@@ -14,7 +14,7 @@ use serde_json::{ self, to_string_pretty };
 use tokio::{
     io::{ AsyncWriteExt, stdout },
     join,
-    sync::{ RwLock, mpsc::{ Sender, UnboundedReceiver, UnboundedSender, channel } },
+    sync::{ RwLock, mpsc::{ UnboundedReceiver, UnboundedSender, channel } },
 };
 
 fn main() {
@@ -60,33 +60,32 @@ impl Writer {
         let mut is_first = true;
 
         while let Some(weak_element) = self.input.recv().await {
-            let Some(element) = weak_element else {
-                break;
-            };
-            if let Some(element) = element.upgrade() {
+            if let Some(element) = weak_element.upgrade() {
                 print_element(&element, &mut stdout, &mut is_first).await;
             }
         }
-
+        stdout.flush().await.unwrap();
         // stdout.write_all(b"]").await.unwrap();
     }
 }
-
+type ChannelData = WeakFsElement;
+type Sender     = UnboundedSender<ChannelData>;
+type Receiver = UnboundedReceiver<ChannelData>;
 pub struct Input {
     starting_path: String,
 }
 
 pub struct Crawler {
-    elements_sender: UnboundedSender<Option<WeakFsElement>>,
+    elements_sender: UnboundedSender<WeakFsElement>,
 }
 
 pub type WriterElement = Weak<OwnedFsElement>;
 impl Crawler {
-    pub async fn crawl(&self, dir_path: &Path, depth: Option<u16>) -> Result<OwnedFsElement, anyhow::Error> {
+    pub async fn crawl(self, dir_path: &Path, depth: Option<u16>) -> Result<OwnedFsElement, anyhow::Error> {
         async fn crawl_inner(
             dir_path: &Path,
             parent: Option<Weak<FsDir>>,
-            sender: &UnboundedSender<Option<WeakFsElement>>,
+            sender: &UnboundedSender<WeakFsElement>,
             remaining_depth: Option<u16>,
         ) -> Result<Arc<FsDir>, anyhow::Error> {
             let mut entries = tokio::fs::read_dir(dir_path).await?;
@@ -155,7 +154,7 @@ impl Crawler {
                 };
                 if let Ok(entry) = open_entry_task.await {
                     let weak_entry = entry.downgrade();
-                    sender.send(Some(weak_entry)).unwrap();
+                    sender.send(weak_entry).unwrap();
                     dir.children.write().await.push(entry);
                 } else {
                     continue;
@@ -164,7 +163,7 @@ impl Crawler {
             Ok(dir)
         }
         let owned_dir = crawl_inner(dir_path, None, &self.elements_sender, depth).await?;
-        self.elements_sender.send(None).unwrap();
+        drop(self.elements_sender);
         Ok(OwnedFsElement::Dir(owned_dir))
     }
 }
@@ -175,7 +174,7 @@ struct OutputRow {
     r#type: FsFileType,
 }
 pub struct Writer {
-    input: UnboundedReceiver<Option<WeakFsElement>>,
+    input: UnboundedReceiver<WeakFsElement>,
 }
 
 #[derive(Debug)]
